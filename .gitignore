@@ -1,4 +1,6 @@
 /.gradle/
 /.idea/
 /build/
-.claude
+sabot-plugin/build/
+.claude/*
+!.claude/CLAUDE.md
