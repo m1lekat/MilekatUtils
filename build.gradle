@@ -6,7 +6,7 @@ plugins {
 }
 
 group 'fr.milekat'
-version '1.10.1'
+version '1.10.1-SNAPSHOT'
 
 ext {
     githubOwner = 'tutur1004'
@@ -133,6 +133,16 @@ publishing {
         maven {
             name = "StagingDeploy"
             url = layout.buildDirectory.dir('staging-deploy')
+        }
+        maven {
+            // Central Portal's snapshot repository — plain Maven deploy, no bundle/validate
+            // step and no signing required (see the `signing` block below).
+            name = "CentralPortalSnapshots"
+            url = uri("https://central.sonatype.com/repository/maven-snapshots/")
+            credentials {
+                username = project.findProperty("mavenCentralUsername") ?: System.getenv("MAVEN_CENTRAL_USERNAME")
+                password = project.findProperty("mavenCentralPassword") ?: System.getenv("MAVEN_CENTRAL_PASSWORD")
+            }
         }
     }
 }
