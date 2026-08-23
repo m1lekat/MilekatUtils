@@ -437,10 +437,18 @@ public class RabbitMQConnection implements MessagingConnection {
      * }
      * </pre>
      *
-     * @param targetRoutingKey The routing key where the message will be sent
+     * @param targetRoutingKey The routing key where the message will be sent — or, if it matches
+     *                         the queue name of a registered task processor, the task queue to
+     *                         deliver the message to (see below)
      * @param senderCallBackKey The routing key for callback/reply messages (can be null)
      * @param message The actual message content to send
      * @throws MessagingSendException if JSON creation fails or message publishing fails
+     *
+     * <p>Task queues (registered via {@link #registerTaskProcessor}) are declared without any
+     * binding to the configured exchange — they are only reachable through RabbitMQ's default
+     * exchange, addressed by queue name. If {@code targetRoutingKey} matches such a queue, this
+     * publishes there directly instead of through the custom exchange, otherwise the message
+     * would 404 (exchange never declared) or be silently dropped (unrouted).
      *
      * @see #connectionReady()
      * @see #initConnection()
@@ -451,6 +459,9 @@ public class RabbitMQConnection implements MessagingConnection {
             initConnection();
         }
 
+        boolean isTaskQueueTarget = registeredProcessors.values().stream()
+                .anyMatch(config -> config.isTaskQueue() && config.target().equals(targetRoutingKey));
+
         try (Channel channel = connection.createChannel()) {
             // Create JSON message format
             JSONObject jsonMessage = new JSONObject();
@@ -460,7 +471,10 @@ public class RabbitMQConnection implements MessagingConnection {
 
             String jsonString = jsonMessage.toString();
 
-            channel.basicPublish(rabbitMQConfig.getName(), targetRoutingKey, null,
+            // Task queues have no exchange binding — the default exchange (routing key = queue
+            // name) is the only path in. Everything else goes through the configured exchange.
+            String exchange = isTaskQueueTarget ? "" : rabbitMQConfig.getName();
+            channel.basicPublish(exchange, targetRoutingKey, null,
                     jsonString.getBytes(StandardCharsets.UTF_8));
         } catch (JSONException e) {
             throw new MessagingSendException("Error while creating JSON message: " + e.getMessage());
