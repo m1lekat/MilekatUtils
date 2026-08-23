@@ -1,0 +1,17 @@
+# Feature toggles — enable only the subsystem(s) the current SNAPSHOT change touches.
+# This file is a template; the real deployed copy on the test server carries real
+# credentials and is never committed.
+messaging:
+  enabled: false
+  type: rabbitmq
+  rabbitmq:
+    hostname: localhost
+    port: 5672
+    vhost: /
+    username: guest
+    password: guest
+    exchange: milekat.sabot.exchange
+    type: x-rtopic
+
+storage:
+  enabled: false
