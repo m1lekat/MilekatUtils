@@ -1,7 +1,5 @@
 # Local-server testing (SNAPSHOT features)
 
-Full detail/history/bugs found: `docs/local-server-testing.md` (only if the below isn't enough).
-
 ## Build
 
 ```
@@ -26,6 +24,8 @@ curl -X POST -H "Authorization: Bearer $PTERODACTYL_CLIENT_TOKEN" --data-binary 
 # 2. write REAL sabot.yml (real creds, e.g. ClaudeSmart secrets/rabbitmq/local.env — never the
 #    committed template, never git-committed). RabbitMQ host must be 172.18.0.1, not localhost
 #    (Pterodactyl containers are on the pterodactyl_nw bridge; localhost = the container itself).
+#    Use a dedicated exchange name (e.g. milekat.sabot.exchange), not the shared
+#    milekat.exchange — the library auto-creates it on first use, no broker setup needed.
 curl -X POST -H "Authorization: Bearer $PTERODACTYL_CLIENT_TOKEN" --data-binary @<realconfig.yml> \
   "$PTERODACTYL_PANEL_URL/api/client/servers/98930545/files/write?file=%2Fplugins%2FMilekatSabot%2Fsabot.yml"
 
