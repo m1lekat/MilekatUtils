@@ -6,7 +6,7 @@ plugins {
 }
 
 group 'fr.milekat'
-version '1.10.0'
+version '1.10.1'
 
 ext {
     githubOwner = 'tutur1004'
