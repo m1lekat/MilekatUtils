@@ -15,8 +15,6 @@ import org.json.JSONObject;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.util.AbstractMap;
-import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeoutException;
@@ -114,11 +112,39 @@ public class RabbitMQConnection implements MessagingConnection {
     private final ConcurrentMap<String, Channel> activeConsumers = new ConcurrentHashMap<>();
 
     /**
-     * Thread-safe map storing consumer configurations for automatic re-registration after reconnection.
-     * Enables automatic recovery of all consumers when the connection is restored.
-     * Key: Processor name, Value: A Pair of routing key and message handler
+     * Immutable configuration for a registered processor, used for automatic re-registration
+     * after reconnection and for pause/resume of task processors.
+     *
+     * @param target     routing key pattern (topic mode) or queue name (task mode)
+     * @param handler    user-provided message handler
+     * @param isTaskQueue {@code true} for task queue (competing consumers), {@code false} for topic
+     * @param active     whether the processor is currently consuming (meaningful for task mode only)
      */
-    private final ConcurrentMap<String, Map.Entry<String, Consumer<ReceivedMessage>>> registeredProcessors = new ConcurrentHashMap<>();
+    private record ProcessorConfig(String target, Consumer<ReceivedMessage> handler,
+                                   boolean isTaskQueue, boolean active) {
+        ProcessorConfig withActive(boolean active) {
+            return new ProcessorConfig(target, handler, isTaskQueue, active);
+        }
+    }
+
+    /**
+     * Thread-safe map storing processor configurations for automatic re-registration after reconnection.
+     * Key: Processor name, Value: ProcessorConfig
+     */
+    private final ConcurrentMap<String, ProcessorConfig> registeredProcessors = new ConcurrentHashMap<>();
+
+    /**
+     * Maps processor names to their active AMQP consumer tags, enabling targeted cancellation.
+     * Key: Processor name, Value: Consumer tag
+     */
+    private final ConcurrentMap<String, String> processorConsumerTags = new ConcurrentHashMap<>();
+
+    /**
+     * Dedicated channels for task queue processors. These channels persist across pause/resume cycles
+     * so the queue declaration is only done once.
+     * Key: Processor name, Value: Channel
+     */
+    private final ConcurrentMap<String, Channel> taskChannels = new ConcurrentHashMap<>();
 
     /**
      * The main RabbitMQ connection instance. Marked volatile for thread-safe visibility
@@ -226,8 +252,10 @@ public class RabbitMQConnection implements MessagingConnection {
             }
         }
 
-        // Clear active consumers (they will be recreated)
+        // Clear active consumers and channel tracking (they will be recreated)
         activeConsumers.clear();
+        processorConsumerTags.clear();
+        taskChannels.clear();
 
         try {
             connection = connectionFactory.newConnection();
@@ -275,12 +303,24 @@ public class RabbitMQConnection implements MessagingConnection {
 
         logger.info("Re-registering " + registeredProcessors.size() + " consumers after reconnection");
 
-        registeredProcessors.forEach((processorName, messageHandler) -> {
+        registeredProcessors.forEach((processorName, config) -> {
             try {
-                createConsumer(processorName, messageHandler.getKey(), messageHandler.getValue());
-                logger.info("Successfully re-registered consumer for queue: " + processorName);
+                if (config.isTaskQueue()) {
+                    // Recreate the dedicated channel for this task processor
+                    Channel taskChannel = connection.createChannel();
+                    taskChannel.basicQos(1);
+                    taskChannel.queueDeclare(config.target(), true, false, false, null);
+                    taskChannels.put(processorName, taskChannel);
+                    // Only re-subscribe if the processor was active before the disconnect
+                    if (config.active()) {
+                        createTaskConsumer(taskChannel, processorName, config.target(), config.handler());
+                    }
+                } else {
+                    createConsumer(processorName, config.target(), config.handler());
+                }
+                logger.info("Successfully re-registered consumer: " + processorName);
             } catch (Exception e) {
-                logger.warning("Failed to re-register consumer for queue '" + processorName + "': " + e.getMessage());
+                logger.warning("Failed to re-register consumer '" + processorName + "': " + e.getMessage());
             }
         });
     }
@@ -343,9 +383,10 @@ public class RabbitMQConnection implements MessagingConnection {
     public void close() {
         logger.info("Closing RabbitMQ connection");
 
-        // Cancel all active consumers
         activeConsumers.clear();
         registeredProcessors.clear();
+        processorConsumerTags.clear();
+        taskChannels.clear();
 
         if (connection != null) {
             try {
@@ -396,10 +437,18 @@ public class RabbitMQConnection implements MessagingConnection {
      * }
      * </pre>
      *
-     * @param targetRoutingKey The routing key where the message will be sent
+     * @param targetRoutingKey The routing key where the message will be sent — or, if it matches
+     *                         the queue name of a registered task processor, the task queue to
+     *                         deliver the message to (see below)
      * @param senderCallBackKey The routing key for callback/reply messages (can be null)
      * @param message The actual message content to send
      * @throws MessagingSendException if JSON creation fails or message publishing fails
+     *
+     * <p>Task queues (registered via {@link #registerTaskProcessor}) are declared without any
+     * binding to the configured exchange — they are only reachable through RabbitMQ's default
+     * exchange, addressed by queue name. If {@code targetRoutingKey} matches such a queue, this
+     * publishes there directly instead of through the custom exchange, otherwise the message
+     * would 404 (exchange never declared) or be silently dropped (unrouted).
      *
      * @see #connectionReady()
      * @see #initConnection()
@@ -410,6 +459,9 @@ public class RabbitMQConnection implements MessagingConnection {
             initConnection();
         }
 
+        boolean isTaskQueueTarget = registeredProcessors.values().stream()
+                .anyMatch(config -> config.isTaskQueue() && config.target().equals(targetRoutingKey));
+
         try (Channel channel = connection.createChannel()) {
             // Create JSON message format
             JSONObject jsonMessage = new JSONObject();
@@ -419,7 +471,10 @@ public class RabbitMQConnection implements MessagingConnection {
 
             String jsonString = jsonMessage.toString();
 
-            channel.basicPublish(rabbitMQConfig.getName(), targetRoutingKey, null,
+            // Task queues have no exchange binding — the default exchange (routing key = queue
+            // name) is the only path in. Everything else goes through the configured exchange.
+            String exchange = isTaskQueueTarget ? "" : rabbitMQConfig.getName();
+            channel.basicPublish(exchange, targetRoutingKey, null,
                     jsonString.getBytes(StandardCharsets.UTF_8));
         } catch (JSONException e) {
             throw new MessagingSendException("Error while creating JSON message: " + e.getMessage());
@@ -485,7 +540,7 @@ public class RabbitMQConnection implements MessagingConnection {
             }
 
             // Store the processor configuration for re-registration after reconnects
-            registeredProcessors.put(processorName, new AbstractMap.SimpleEntry<>(routingKey, messageHandler));
+            registeredProcessors.put(processorName, new ProcessorConfig(routingKey, messageHandler, false, true));
 
             // Create the actual consumer
             createConsumer(processorName, routingKey, messageHandler);
@@ -534,50 +589,78 @@ public class RabbitMQConnection implements MessagingConnection {
      */
     private void createConsumer(String processorName, String routingKey, Consumer<ReceivedMessage> messageHandler)
             throws IOException {
-        // Create a dedicated channel for this consumer
         Channel consumerChannel = connection.createChannel();
 
-        // Ensure the queue exists
         consumerChannel.exchangeDeclare(rabbitMQConfig.getName(), rabbitMQConfig.getType());
         consumerChannel.queueDeclare(processorName, false, true, true, null);
         consumerChannel.queueBind(processorName, rabbitMQConfig.getName(), routingKey);
 
-        // Create the delivery callback
-        DeliverCallback deliverCallback = (consumerTag, delivery) -> {
+        DeliverCallback deliverCallback = buildDeliverCallback(consumerChannel, routingKey, messageHandler);
+        CancelCallback cancelCallback = consumerTag -> logger.info("Consumer cancelled: " + consumerTag);
+
+        String consumerTag = consumerChannel.basicConsume(processorName, false, deliverCallback, cancelCallback);
+        activeConsumers.put(consumerTag, consumerChannel);
+        processorConsumerTags.put(processorName, consumerTag);
+    }
+
+    /**
+     * Creates an AMQP consumer on the given channel for a task queue.
+     * The channel must already have {@code basicQos(1)} set and the queue declared.
+     *
+     * @param channel       dedicated channel for this task processor
+     * @param processorName processor name (for tracking)
+     * @param queueName     name of the shared task queue
+     * @param messageHandler user-provided message handler
+     * @throws IOException if consumer registration fails
+     */
+    private void createTaskConsumer(Channel channel, String processorName, String queueName,
+                                    Consumer<ReceivedMessage> messageHandler) throws IOException {
+        DeliverCallback deliverCallback = buildDeliverCallback(channel, queueName, messageHandler);
+        CancelCallback cancelCallback = consumerTag -> logger.info("Task consumer cancelled: " + consumerTag);
+
+        String consumerTag = channel.basicConsume(queueName, false, deliverCallback, cancelCallback);
+        activeConsumers.put(consumerTag, channel);
+        processorConsumerTags.put(processorName, consumerTag);
+    }
+
+    /**
+     * Builds a reusable {@link DeliverCallback} that parses the JSON envelope, validates the TAG,
+     * invokes the user handler, and auto-rejects messages that are not acknowledged.
+     *
+     * @param channel    channel used for ack/nack operations
+     * @param routingKey routing key reported to the handler via {@link ReceivedMessage#getRoutingKey()}
+     * @param messageHandler user-provided processing function
+     * @return a ready-to-use DeliverCallback
+     */
+    private DeliverCallback buildDeliverCallback(Channel channel, String routingKey,
+                                                 Consumer<ReceivedMessage> messageHandler) {
+        return (consumerTag, delivery) -> {
             try {
                 String rawMessage = new String(delivery.getBody(), StandardCharsets.UTF_8);
 
-                // Try to parse as JSON
                 JSONObject jsonMessage;
                 try {
                     jsonMessage = new JSONObject(rawMessage);
                 } catch (JSONException e) {
                     logger.debug("Message is not valid JSON, ignoring: " + rawMessage);
-                    // Acknowledge the message to remove it from queue
-                    consumerChannel.basicAck(delivery.getEnvelope().getDeliveryTag(), false);
+                    channel.basicAck(delivery.getEnvelope().getDeliveryTag(), false);
                     return;
                 }
 
-                // Check if message has our custom tag
                 if (!jsonMessage.has("TAG") || !messageTag.equals(jsonMessage.getString("TAG"))) {
                     logger.debug("Message does not have the required TAG '" + messageTag + "', ignoring");
-                    // Acknowledge the message to remove it from queue
-                    consumerChannel.basicAck(delivery.getEnvelope().getDeliveryTag(), false);
+                    channel.basicAck(delivery.getEnvelope().getDeliveryTag(), false);
                     return;
                 }
 
-                // Extract callback routing key and actual message
                 String senderCallBackKey = jsonMessage.optString("senderCallBackKey", null);
                 String actualMessage = jsonMessage.optString("message", "");
 
-                // Create ReceivedMessage wrapper using the callback routing key
-                ReceivedMessage rabbitMessage = new RabbitMessage(consumerChannel,
+                ReceivedMessage rabbitMessage = new RabbitMessage(channel,
                         delivery.getEnvelope().getDeliveryTag(), routingKey, senderCallBackKey, actualMessage);
 
-                // Call the user-provided message handler
                 messageHandler.accept(rabbitMessage);
 
-                // Auto-reject if user forgot to ack/reject
                 if (!rabbitMessage.isAcknowledged()) {
                     logger.warning("Message was not acknowledged or rejected by handler, auto-rejecting");
                     rabbitMessage.reject();
@@ -585,23 +668,117 @@ public class RabbitMQConnection implements MessagingConnection {
 
             } catch (Exception e) {
                 logger.warning("Error processing message: " + e.getMessage());
-                // Reject the message and don't requeue to avoid infinite loops
                 try {
-                    consumerChannel.basicNack(delivery.getEnvelope().getDeliveryTag(), false, false);
+                    channel.basicNack(delivery.getEnvelope().getDeliveryTag(), false, false);
                 } catch (IOException ioException) {
                     logger.warning("Failed to nack message: " + ioException.getMessage());
                 }
             }
         };
+    }
 
-        // Cancel callback (optional, for logging)
-        CancelCallback cancelCallback = consumerTag -> logger.info("Consumer cancelled: " + consumerTag);
+    /**
+     * Registers a task queue processor (competing consumers mode).
+     * The queue is declared as durable and non-exclusive so multiple workers can share it.
+     * The processor starts <strong>inactive</strong>; call {@link #setProcessorActive(String, boolean)}
+     * when the worker is ready to accept tasks.
+     *
+     * @param processorName unique name for this processor instance
+     * @param queueName the shared queue name
+     * @param messageHandler user-provided message handler
+     * @throws MessagingLoadException if a processor with the same name already exists or setup fails
+     */
+    @Override
+    public void registerTaskProcessor(@NotNull String processorName, @NotNull String queueName,
+                                      @NotNull Consumer<ReceivedMessage> messageHandler)
+            throws MessagingLoadException {
+        if (registeredProcessors.containsKey(processorName))
+            throw new MessagingLoadException("Processor with name '" + processorName + "' is already registered");
+        try {
+            if (!connectionReady()) {
+                initConnection();
+            }
 
-        // Start consuming
-        String consumerTag = consumerChannel.basicConsume(processorName, false, deliverCallback, cancelCallback);
+            // Create and prepare a dedicated channel kept alive through pause/resume cycles
+            Channel taskChannel = connection.createChannel();
+            taskChannel.basicQos(1); // fair dispatch: one in-flight message per worker
+            taskChannel.queueDeclare(queueName, true, false, false, null);
+            taskChannels.put(processorName, taskChannel);
 
-        // Track the consumer for cleanup
-        activeConsumers.put(consumerTag, consumerChannel);
+            // Store config; inactive by default — worker calls setProcessorActive when ready
+            registeredProcessors.put(processorName, new ProcessorConfig(queueName, messageHandler, true, false));
+
+            logger.info("Registered task processor '" + processorName + "' for queue: " + queueName + " (inactive)");
+        } catch (IOException e) {
+            logger.stack(e.getStackTrace());
+            throw new MessagingLoadException("IO Error while registering task processor: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Activates or deactivates a task processor without disconnecting.
+     *
+     * <p>When deactivating ({@code active = false}), the AMQP consumer subscription is canceled
+     * via {@code basicCancel} — no new messages are pushed, but the channel and queue declaration
+     * remain open for fast reactivation.
+     *
+     * <p>When activating ({@code active = true}), a new AMQP consumer is registered on the
+     * existing channel. If the channel was lost (e.g. after reconnection), a fresh one is created.
+     *
+     * @param processorName name of the task processor to toggle
+     * @param active        {@code true} to start consuming, {@code false} to stop
+     * @throws MessagingLoadException if the processor is unknown, not a task processor, or activation fails
+     */
+    @Override
+    public void setProcessorActive(@NotNull String processorName, boolean active)
+            throws MessagingLoadException {
+        ProcessorConfig config = registeredProcessors.get(processorName);
+        if (config == null)
+            throw new MessagingLoadException("No processor registered with name: '" + processorName + "'");
+        if (!config.isTaskQueue())
+            throw new MessagingLoadException("setProcessorActive is only applicable to task queue processors");
+        if (active == config.active())
+            return; // already in the desired state — no-op
+
+        if (!active) {
+            // Cancel the consumer subscription; keep the channel open
+            String consumerTag = processorConsumerTags.remove(processorName);
+            if (consumerTag != null) {
+                activeConsumers.remove(consumerTag);
+                Channel channel = taskChannels.get(processorName);
+                if (channel != null && channel.isOpen()) {
+                    try {
+                        channel.basicCancel(consumerTag);
+                    } catch (IOException e) {
+                        logger.warning("Error cancelling consumer '" + processorName + "': " + e.getMessage());
+                    }
+                }
+            }
+            registeredProcessors.put(processorName, config.withActive(false));
+            logger.info("Task processor deactivated: " + processorName);
+        } else {
+            // Ensure the dedicated channel is open (recreate if needed after a reconnect)
+            Channel channel = taskChannels.get(processorName);
+            if (channel == null || !channel.isOpen()) {
+                try {
+                    channel = connection.createChannel();
+                    channel.basicQos(1);
+                    channel.queueDeclare(config.target(), true, false, false, null);
+                    taskChannels.put(processorName, channel);
+                } catch (IOException e) {
+                    throw new MessagingLoadException(
+                            "Failed to recreate channel for task processor '" + processorName + "': " + e.getMessage());
+                }
+            }
+            try {
+                createTaskConsumer(channel, processorName, config.target(), config.handler());
+            } catch (IOException e) {
+                throw new MessagingLoadException(
+                        "Failed to activate task processor '" + processorName + "': " + e.getMessage());
+            }
+            registeredProcessors.put(processorName, config.withActive(true));
+            logger.info("Task processor activated: " + processorName);
+        }
     }
 
     /**
@@ -629,22 +806,41 @@ public class RabbitMQConnection implements MessagingConnection {
      */
     @Override
     public void unregisterMessageProcessor(String processorName) {
-        registeredProcessors.remove(processorName);
+        ProcessorConfig config = registeredProcessors.remove(processorName);
 
-        // Find and stop the corresponding consumer
-        activeConsumers.entrySet().removeIf(entry -> {
-            try {
-                Channel channel = entry.getValue();
-                if (channel.isOpen()) {
-                    channel.close();
+        // Cancel the active consumer subscription
+        String consumerTag = processorConsumerTags.remove(processorName);
+        if (consumerTag != null) {
+            Channel channel = activeConsumers.remove(consumerTag);
+            if (channel != null && channel.isOpen()) {
+                try {
+                    channel.basicCancel(consumerTag);
+                } catch (IOException e) {
+                    logger.warning("Error cancelling consumer for '" + processorName + "': " + e.getMessage());
                 }
-                return true;
-            } catch (Exception e) {
-                logger.warning("Error stopping consumer: " + e.getMessage());
-                return true;
+                // For topic processors the channel is owned by this consumer — close it
+                if (config != null && !config.isTaskQueue()) {
+                    try {
+                        channel.close();
+                    } catch (Exception e) {
+                        logger.warning("Error closing channel for '" + processorName + "': " + e.getMessage());
+                    }
+                }
             }
-        });
+        }
 
-        logger.info("Unregistered message processor for queue: " + processorName);
+        // For task processors, also close the dedicated persistent channel
+        if (config != null && config.isTaskQueue()) {
+            Channel taskChannel = taskChannels.remove(processorName);
+            if (taskChannel != null && taskChannel.isOpen()) {
+                try {
+                    taskChannel.close();
+                } catch (Exception e) {
+                    logger.warning("Error closing task channel for '" + processorName + "': " + e.getMessage());
+                }
+            }
+        }
+
+        logger.info("Unregistered message processor: " + processorName);
     }
 }

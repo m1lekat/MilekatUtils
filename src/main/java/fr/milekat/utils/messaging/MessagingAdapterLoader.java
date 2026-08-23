@@ -52,9 +52,11 @@ public class MessagingAdapterLoader {
                         (MessagingConnection) Class.forName(vendor.getAdapterConnectionClass())
                                 .getDeclaredConstructor(Configs.class, MileLogger.class)
                                 .newInstance(config, logger));
-            } catch (ClassNotFoundException | NoSuchMethodException | InvocationTargetException |
-                     InstantiationException | IllegalAccessException ignored) {
-                // Silently ignore unavailable adapters to allow partial loading
+            } catch (ClassNotFoundException ignored) {
+                // Driver not on classpath — adapter intentionally skipped
+            } catch (NoSuchMethodException | InvocationTargetException |
+                     InstantiationException | IllegalAccessException exception) {
+                logger.warn("Failed to load messaging adapter for " + vendor.name() + ": " + exception.getMessage());
             }
         }
         return messagingConnections;

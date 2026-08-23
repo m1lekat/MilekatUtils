@@ -89,6 +89,60 @@ public interface MessagingConnection {
                                   @NotNull Consumer<ReceivedMessage> messageHandler) throws MessagingLoadException;
 
     /**
+     * Registers a task queue processor (competing consumers mode).
+     * Multiple workers can register with the same {@code queueName}; each message is delivered to
+     * exactly one worker. The processor starts <strong>inactive</strong> — call
+     * {@link #setProcessorActive(String, boolean)} when the worker is ready to accept tasks.
+     *
+     * @param queueName the shared queue name (same across all competing workers for this task type)
+     * @param messageHandler consumer that processes the received message
+     * @return a UUID string identifying this processor instance (for management calls)
+     * @throws MessagingLoadException if registration fails
+     */
+    default String registerTaskProcessor(@NotNull String queueName,
+                                         @NotNull Consumer<ReceivedMessage> messageHandler)
+            throws MessagingLoadException {
+        String processorName = UUID.randomUUID().toString();
+        registerTaskProcessor(processorName, queueName, messageHandler);
+        return processorName;
+    }
+
+    /**
+     * Registers a task queue processor (competing consumers mode).
+     * Multiple workers can register with the same {@code queueName}; each message is delivered to
+     * exactly one worker. The processor starts <strong>inactive</strong> — call
+     * {@link #setProcessorActive(String, boolean)} when the worker is ready to accept tasks.
+     *
+     * @param processorName unique name for this processor instance
+     * @param queueName the shared queue name (same across all competing workers for this task type)
+     * @param messageHandler consumer that processes the received message
+     * @throws MessagingLoadException if a processor with the same name already exists or setup fails
+     */
+    void registerTaskProcessor(@NotNull String processorName, @NotNull String queueName,
+                                @NotNull Consumer<ReceivedMessage> messageHandler) throws MessagingLoadException;
+
+    /**
+     * Activates or deactivates a task processor.
+     *
+     * <p>When <strong>inactive</strong>, the worker holds no AMQP consumer subscription —
+     * no messages are pushed to it and the queue is not consumed.
+     * When <strong>active</strong>, the worker registers an AMQP consumer and starts
+     * receiving messages from the shared queue.
+     *
+     * <p>This allows a worker to signal readiness without connecting or disconnecting:
+     * call {@code setProcessorActive("worker", true)} when ready to accept a task,
+     * and {@code setProcessorActive("worker", false)} when busy.
+     *
+     * <p>Only applicable to processors registered via {@link #registerTaskProcessor}.
+     *
+     * @param processorName the name of the task processor
+     * @param active {@code true} to start consuming, {@code false} to stop consuming
+     * @throws MessagingLoadException if the processor is unknown, is not a task processor,
+     *                               or activation fails
+     */
+    void setProcessorActive(@NotNull String processorName, boolean active) throws MessagingLoadException;
+
+    /**
      * Unregisters a message processor by its name.
      * This stops the processor from receiving any further messages.
      *
