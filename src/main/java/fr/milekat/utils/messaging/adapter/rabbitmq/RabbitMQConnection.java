@@ -25,6 +25,7 @@ import java.util.function.Consumer;
  *
  * <p>This class provides a robust RabbitMQ connection with the following features:
  * <ul>
+ *   <li>Retry with backoff on the initial connection attempt</li>
  *   <li>Automatic connection recovery and heartbeat management</li>
  *   <li>JSON message format with custom tagging for message filtering</li>
  *   <li>Consumer auto-recovery after connection failures</li>
@@ -44,6 +45,8 @@ import java.util.function.Consumer;
  *     password: "guest"              # RabbitMQ password
  *     exchange: "milekat.exchange"   # Exchange name (optional, defaults to "milekat.exchange")
  *     type: "x-rtopic"               # Exchange type (optional, defaults to "x-rtopic")
+ *     connect-retries: 5             # Initial connection attempts before giving up (optional, defaults to 5)
+ *     connect-retry-delay-ms: 5000   # Delay between initial connection attempts (optional, defaults to 5000)
  * </pre>
  *
  * <p><strong>Message Format:</strong>
@@ -97,6 +100,16 @@ public class RabbitMQConnection implements MessagingConnection {
 
     /** Messaging channel configuration containing exchange name and type */
     private final MessagingChanel rabbitMQConfig;
+
+    /**
+     * Number of attempts made to establish the initial connection before giving up.
+     * Automatic recovery only protects a connection that already succeeded once,
+     * so the first attempt needs its own retry loop.
+     */
+    private final int connectRetries;
+
+    /** Delay, in milliseconds, between initial connection attempts. */
+    private final long connectRetryDelayMs;
 
     /**
      * Custom message tag used to filter and identify messages sent by this application.
@@ -159,13 +172,17 @@ public class RabbitMQConnection implements MessagingConnection {
      * <ol>
      *   <li>Reads RabbitMQ connection parameters from the configuration</li>
      *   <li>Sets up the connection factory with automatic recovery enabled</li>
-     *   <li>Establishes the initial connection to the RabbitMQ server</li>
+     *   <li>Establishes the initial connection to the RabbitMQ server, retrying with a
+     *       fixed delay on failure</li>
      *   <li>Configures heartbeat and network recovery settings for reliability</li>
      * </ol>
      *
      * <p><strong>Connection Settings:</strong>
      * <ul>
-     *   <li>Automatic Recovery: Enabled with 5-second intervals</li>
+     *   <li>Automatic Recovery: Enabled with 5-second intervals (post-connection only)</li>
+     *   <li>Initial Connection: Retried up to {@code connect-retries} times (default 5),
+     *       waiting {@code connect-retry-delay-ms} between attempts (default 5000) — automatic
+     *       recovery does not cover a connection that never succeeded in the first place</li>
      *   <li>Heartbeat: 30 seconds to detect connection issues</li>
      *   <li>Network Recovery: Automatically reconnects on network failures</li>
      * </ul>
@@ -173,6 +190,7 @@ public class RabbitMQConnection implements MessagingConnection {
      * @param config Configuration object containing RabbitMQ connection parameters
      * @param logger Logger instance for debugging and monitoring
      * @throws MessagingLoadException if unable to establish connection to RabbitMQ server
+     *         after all retries are exhausted
      *
      * @see Configs
      * @see MileLogger
@@ -186,6 +204,8 @@ public class RabbitMQConnection implements MessagingConnection {
         String vhost = config.getString("messaging.rabbitmq.vhost", "/");
         String username = config.getString("messaging.rabbitmq.username", "null");
         String password = config.getString("messaging.rabbitmq.password", "null");
+        this.connectRetries = Math.max(1, config.getInt("messaging.rabbitmq.connect-retries", 5));
+        this.connectRetryDelayMs = Math.max(0, config.getInt("messaging.rabbitmq.connect-retry-delay-ms", 5000));
 
         // Debug hostname/port
         logger.debug("Hostname: " + host);
@@ -212,13 +232,35 @@ public class RabbitMQConnection implements MessagingConnection {
         connectionFactory.setNetworkRecoveryInterval(5000);
         connectionFactory.setRequestedHeartbeat(30);
 
-        // Initialize connection
-        try {
-            initConnection();
-            connectionReady();
-        } catch (MessagingLoadException e) {
-            throw new MessagingLoadException("Couldn't connect to RabbitMQ server");
+        // Initialize connection, retrying with a fixed delay: automatic recovery only
+        // takes over once a connection has been established at least once, so a transient
+        // failure on this very first attempt (DNS/network not ready yet, broker still
+        // starting, ...) would otherwise be fatal with no recovery path.
+        MessagingLoadException lastFailure = null;
+        for (int attempt = 1; attempt <= connectRetries; attempt++) {
+            try {
+                initConnection();
+                lastFailure = null;
+                break;
+            } catch (MessagingLoadException e) {
+                lastFailure = e;
+                logger.warning("RabbitMQ connection attempt " + attempt + "/" + connectRetries +
+                        " failed: " + e.getMessage());
+                if (attempt < connectRetries && connectRetryDelayMs > 0) {
+                    try {
+                        Thread.sleep(connectRetryDelayMs);
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        throw new MessagingLoadException("Interrupted while retrying RabbitMQ connection");
+                    }
+                }
+            }
         }
+        if (lastFailure != null) {
+            throw new MessagingLoadException("Couldn't connect to RabbitMQ server after " +
+                    connectRetries + " attempts: " + lastFailure.getMessage());
+        }
+        connectionReady();
     }
 
     /**
