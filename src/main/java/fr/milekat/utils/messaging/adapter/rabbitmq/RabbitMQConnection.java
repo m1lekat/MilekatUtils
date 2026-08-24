@@ -160,6 +160,18 @@ public class RabbitMQConnection implements MessagingConnection {
     private final ConcurrentMap<String, Channel> taskChannels = new ConcurrentHashMap<>();
 
     /**
+     * Confirms, once per name, that a {@link #sendMessage} target is a task queue declared by
+     * some <em>other</em> connection/process — {@code registeredProcessors} only knows about
+     * task queues registered locally, which is useless for the common case of a producer that
+     * never registers anything itself. Only ever holds confirmed positives: a name checked
+     * before its queue exists must be re-checked next time rather than staying wrongly cached,
+     * since the queue may not have been declared yet (e.g. the consumer pod hasn't started).
+     * Once a name is confirmed, it stays confirmed — task queues aren't torn down in normal
+     * operation.
+     */
+    private final ConcurrentMap<String, Boolean> taskQueueTargetCache = new ConcurrentHashMap<>();
+
+    /**
      * The main RabbitMQ connection instance. Marked volatile for thread-safe visibility
      * across multiple threads during connection state changes.
      */
@@ -479,18 +491,20 @@ public class RabbitMQConnection implements MessagingConnection {
      * }
      * </pre>
      *
-     * @param targetRoutingKey The routing key where the message will be sent — or, if it matches
-     *                         the queue name of a registered task processor, the task queue to
-     *                         deliver the message to (see below)
+     * @param targetRoutingKey The routing key where the message will be sent — or, if it names
+     *                         a task queue (see below), the queue to deliver the message to
      * @param senderCallBackKey The routing key for callback/reply messages (can be null)
      * @param message The actual message content to send
      * @throws MessagingSendException if JSON creation fails or message publishing fails
      *
      * <p>Task queues (registered via {@link #registerTaskProcessor}) are declared without any
      * binding to the configured exchange — they are only reachable through RabbitMQ's default
-     * exchange, addressed by queue name. If {@code targetRoutingKey} matches such a queue, this
-     * publishes there directly instead of through the custom exchange, otherwise the message
-     * would 404 (exchange never declared) or be silently dropped (unrouted).
+     * exchange, addressed by queue name. The caller does not need to know or declare which kind
+     * of target this is: {@link #isTaskQueueTarget} checks with the broker itself whether a
+     * queue by this name exists (a task queue may have been registered by an entirely different
+     * process — a local-only check would miss that), and this method routes accordingly.
+     * Without this, a message meant for a task queue would either 404 (exchange never declared)
+     * or be silently dropped (unrouted) instead of ever reaching its consumers.
      *
      * @see #connectionReady()
      * @see #initConnection()
@@ -501,8 +515,7 @@ public class RabbitMQConnection implements MessagingConnection {
             initConnection();
         }
 
-        boolean isTaskQueueTarget = registeredProcessors.values().stream()
-                .anyMatch(config -> config.isTaskQueue() && config.target().equals(targetRoutingKey));
+        boolean isTaskQueueTarget = isTaskQueueTarget(targetRoutingKey);
 
         try (Channel channel = connection.createChannel()) {
             // Create JSON message format
@@ -522,6 +535,36 @@ public class RabbitMQConnection implements MessagingConnection {
             throw new MessagingSendException("Error while creating JSON message: " + e.getMessage());
         } catch (Exception e) {
             throw new MessagingSendException("Error while sending message to RabbitMQ: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Determines whether {@code targetRoutingKey} names a task queue, so {@link #sendMessage}
+     * can pick the right exchange without the caller having to know or care.
+     *
+     * <p>Checks local registrations first (covers a process that both produces and consumes,
+     * e.g. a single-instance test harness). Otherwise asks the broker directly whether a queue
+     * by this exact name exists, via a passive declare on a disposable channel — the only
+     * signal that works regardless of which process registered the task queue, since a task
+     * queue carries no exchange binding to detect any other way. Confirmed positives are
+     * cached; a negative is re-checked every time, since it may just mean the consumer hasn't
+     * registered the queue yet.
+     */
+    private boolean isTaskQueueTarget(String targetRoutingKey) {
+        boolean registeredLocally = registeredProcessors.values().stream()
+                .anyMatch(config -> config.isTaskQueue() && config.target().equals(targetRoutingKey));
+        if (registeredLocally) {
+            return true;
+        }
+        if (Boolean.TRUE.equals(taskQueueTargetCache.get(targetRoutingKey))) {
+            return true;
+        }
+        try (Channel probe = connection.createChannel()) {
+            probe.queueDeclarePassive(targetRoutingKey);
+            taskQueueTargetCache.put(targetRoutingKey, true);
+            return true;
+        } catch (Exception e) {
+            return false;
         }
     }
 
