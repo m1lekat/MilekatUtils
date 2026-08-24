@@ -16,12 +16,13 @@ import java.io.File;
 public class SabotPlugin extends JavaPlugin {
     private MileLogger logger;
     private MessagingConnection messaging;
+    private Configs config;
 
     @Override
     public void onEnable() {
         logger = new MileLogger(getLogger());
         saveResource("sabot.yml", false);
-        Configs config = new Configs(new File(getDataFolder(), "sabot.yml"));
+        config = new Configs(new File(getDataFolder(), "sabot.yml"));
 
         if (config.getBoolean("messaging.enabled", false)) {
             try {
@@ -40,7 +41,7 @@ public class SabotPlugin extends JavaPlugin {
             logger.info("Storage subsystem disabled in sabot.yml — skipped");
         }
 
-        SabotCommand command = new SabotCommand(this, logger, messaging);
+        SabotCommand command = new SabotCommand(this, logger, messaging, config);
         getCommand("sabot").setExecutor(command);
         getCommand("sabot").setTabCompleter(command);
     }

@@ -49,10 +49,9 @@ public class RabbitMessage implements ReceivedMessage {
     }
 
     @Override
-
-    public void reject() throws IOException {
+    public void reject(boolean requeue) throws IOException {
         if (!acknowledged) {
-            channel.basicNack(deliveryTag, false, false);
+            channel.basicNack(deliveryTag, false, requeue);
             acknowledged = true;
         }
     }

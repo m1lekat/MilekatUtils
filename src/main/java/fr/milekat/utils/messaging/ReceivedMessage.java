@@ -41,11 +41,27 @@ public interface ReceivedMessage {
     void ack() throws IOException;
 
     /**
-     * Reject the message (mark as failed, won't be re-queued)
+     * Reject the message as failed, without re-queueing it.
+     * <p>Equivalent to {@code reject(false)}.
      *
      * @throws IOException if an error occurs during rejection
      */
-    void reject() throws IOException;
+    default void reject() throws IOException {
+        reject(false);
+    }
+
+    /**
+     * Reject the message, optionally putting it back on the queue for another consumer.
+     *
+     * <p>Use {@code requeue = true} for a condition specific to this consumer rather than the
+     * message itself — e.g. a task-queue worker that has just run out of capacity and wants
+     * another worker to get a chance at it, instead of the message being lost or treated as a
+     * permanent failure.
+     *
+     * @param requeue whether the broker should redeliver this message to another consumer
+     * @throws IOException if an error occurs during rejection
+     */
+    void reject(boolean requeue) throws IOException;
 
     /**
      * Check if the message has been acknowledged
