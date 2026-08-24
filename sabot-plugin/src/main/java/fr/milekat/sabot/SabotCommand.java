@@ -1,5 +1,6 @@
 package fr.milekat.sabot;
 
+import fr.milekat.utils.Configs;
 import fr.milekat.utils.MileLogger;
 import fr.milekat.utils.messaging.MessagingConnection;
 import org.bukkit.command.Command;
@@ -21,11 +22,14 @@ public class SabotCommand implements CommandExecutor, TabCompleter {
     private final SabotPlugin plugin;
     private final MileLogger logger;
     private final @Nullable MessagingConnection messaging;
+    private final Configs config;
 
-    public SabotCommand(SabotPlugin plugin, MileLogger logger, @Nullable MessagingConnection messaging) {
+    public SabotCommand(SabotPlugin plugin, MileLogger logger, @Nullable MessagingConnection messaging,
+                         Configs config) {
         this.plugin = plugin;
         this.logger = logger;
         this.messaging = messaging;
+        this.config = config;
     }
 
     @Override
@@ -53,13 +57,21 @@ public class SabotCommand implements CommandExecutor, TabCompleter {
             return true;
         }
         if (args.length == 0) {
-            sender.sendMessage("/sabot messaging <send|topic|task|active|unregister|droptest> ...");
+            sender.sendMessage("/sabot messaging <send|topic|task|active|unregister|droptest|requeuetest|crossprocesstest> ...");
             return true;
         }
         try {
             switch (args[0].toLowerCase()) {
                 case "droptest": {
                     DisconnectTest.run(plugin, logger, messaging, sender);
+                    return true;
+                }
+                case "requeuetest": {
+                    RequeueTest.run(logger, messaging, sender);
+                    return true;
+                }
+                case "crossprocesstest": {
+                    CrossProcessTaskTest.run(config, logger, sender);
                     return true;
                 }
                 case "send": {
@@ -136,7 +148,7 @@ public class SabotCommand implements CommandExecutor, TabCompleter {
             return Arrays.asList("status", "messaging");
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("messaging")) {
-            return Arrays.asList("send", "topic", "task", "active", "unregister", "droptest");
+            return Arrays.asList("send", "topic", "task", "active", "unregister", "droptest", "requeuetest", "crossprocesstest");
         }
         return Collections.emptyList();
     }
