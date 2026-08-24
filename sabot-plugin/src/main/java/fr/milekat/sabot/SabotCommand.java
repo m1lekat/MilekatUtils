@@ -53,11 +53,15 @@ public class SabotCommand implements CommandExecutor, TabCompleter {
             return true;
         }
         if (args.length == 0) {
-            sender.sendMessage("/sabot messaging <send|topic|task|active|unregister> ...");
+            sender.sendMessage("/sabot messaging <send|topic|task|active|unregister|droptest> ...");
             return true;
         }
         try {
             switch (args[0].toLowerCase()) {
+                case "droptest": {
+                    DisconnectTest.run(plugin, logger, messaging, sender);
+                    return true;
+                }
                 case "send": {
                     // /sabot messaging send <routingKey> <message...>
                     String routingKey = args[1];
@@ -132,7 +136,7 @@ public class SabotCommand implements CommandExecutor, TabCompleter {
             return Arrays.asList("status", "messaging");
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("messaging")) {
-            return Arrays.asList("send", "topic", "task", "active", "unregister");
+            return Arrays.asList("send", "topic", "task", "active", "unregister", "droptest");
         }
         return Collections.emptyList();
     }
