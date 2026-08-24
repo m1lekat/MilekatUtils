@@ -6,7 +6,7 @@ plugins {
 }
 
 group 'fr.milekat'
-version '1.10.2'
+version '1.10.3'
 
 ext {
     githubOwner = 'tutur1004'
@@ -140,6 +140,11 @@ publishing {
 signing {
     // Only apply signing when it's not a snapshot version
     if (!version.endsWith('SNAPSHOT')) {
+        def signingKey = System.getenv("SIGNING_KEY")
+        def signingPassword = System.getenv("SIGNING_PASSWORD")
+        if (signingKey && signingPassword) {
+            useInMemoryPgpKeys(signingKey, signingPassword)
+        }
         sign publishing.publications
     }
 }
