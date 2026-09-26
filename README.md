@@ -53,7 +53,7 @@ dependencies {
 ```
 
 > **GitHub Packages** is also available as an alternative registry.
-> It requires a GitHub personal access token with `read:packages` scope and the repository URL `https://maven.pkg.github.com/tutur1004/MilekatUtils`.
+> It requires a GitHub personal access token with `read:packages` scope and the repository URL `https://maven.pkg.github.com/m1lekat/MilekatUtils`.
 
 ### Optional runtime dependencies
 
@@ -264,8 +264,8 @@ JAVA_HOME="/c/Users/arthu/.jdks/corretto-21.0.6" ./gradlew publish
 
 ## Credits
 
-- **Developer:** Milekat — [GitHub](https://github.com/tutur1004)
+- **Developer:** Milekat — [GitHub](https://github.com/m1lekat)
 
 ## Support
 
-Report issues at [MilekatUtils GitHub Issues](https://github.com/tutur1004/MilekatUtils/issues).
+Report issues at [MilekatUtils GitHub Issues](https://github.com/m1lekat/MilekatUtils/issues).

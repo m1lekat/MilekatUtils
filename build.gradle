@@ -6,10 +6,10 @@ plugins {
 }
 
 group 'fr.milekat'
-version '1.10.3'
+version '1.10.4'
 
 ext {
-    githubOwner = 'tutur1004'
+    githubOwner = 'm1lekat'
     repository = 'MilekatUtils'
 }
 
@@ -95,7 +95,7 @@ publishing {
             pom {
                 name = 'MilekatUtils'
                 description = 'Utils for Milekat plugins'
-                url = 'https://github.com/tutur1004/MilekatUtils'
+                url = 'https://github.com/m1lekat/MilekatUtils'
 
                 licenses {
                     license {
@@ -113,9 +113,9 @@ publishing {
                 }
 
                 scm {
-                    connection = 'scm:git:git://github.com/tutur1004/MilekatUtils.git'
-                    developerConnection = 'scm:git:ssh://github.com/tutur1004/MilekatUtils.git'
-                    url = 'https://github.com/tutur1004/MilekatUtils'
+                    connection = 'scm:git:git://github.com/m1lekat/MilekatUtils.git'
+                    developerConnection = 'scm:git:ssh://github.com/m1lekat/MilekatUtils.git'
+                    url = 'https://github.com/m1lekat/MilekatUtils'
                 }
             }
         }
