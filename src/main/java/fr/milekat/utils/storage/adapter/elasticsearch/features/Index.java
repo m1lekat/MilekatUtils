@@ -20,16 +20,19 @@ public class Index {
     private final Map<String, Class<?>> fields = new HashMap<>();
     private final Map<String, Class<?>> tags = new HashMap<>();
     private final String tagsFieldName;
+    private final boolean strictMapping;
 
     public Index(@NotNull ElasticsearchClient client,
                  @NotNull String indexName,
                  @NotNull String numberOfReplicas,
-                 @NotNull Map<String, Class<?>> fields) throws StorageLoadException {
+                 @NotNull Map<String, Class<?>> fields,
+                 boolean strictMapping) throws StorageLoadException {
         this.client = client;
         this.indexName = indexName;
         this.numberOfReplicas = numberOfReplicas;
         this.fields.putAll(fields);
         this.tagsFieldName = null;
+        this.strictMapping = strictMapping;
         load();
     }
 
@@ -38,13 +41,15 @@ public class Index {
                  @NotNull String numberOfReplicas,
                  @NotNull Map<String, Class<?>> fields,
                  @NotNull Map<String, Class<?>> tags,
-                 @NotNull String tagsFieldName) throws StorageLoadException {
+                 @NotNull String tagsFieldName,
+                 boolean strictMapping) throws StorageLoadException {
         this.client = client;
         this.indexName = indexName;
         this.numberOfReplicas = numberOfReplicas;
         this.fields.putAll(fields);
         this.tags.putAll(tags);
         this.tagsFieldName = tagsFieldName;
+        this.strictMapping = strictMapping;
         load();
     }
 
@@ -72,8 +77,11 @@ public class Index {
         try {
             StorageLoader.getStorageLogger().debug("Creating index '" + indexName + "'...");
             client.indices().create(c -> c.index(indexName)
-                    .mappings(m -> m.properties(Mapping.getMapping(fields, tags, tagsFieldName))
-                            .dynamic(DynamicMapping.Strict))
+                    .mappings(m -> {
+                        m.properties(Mapping.getMapping(fields, tags, tagsFieldName));
+                        if (strictMapping) m.dynamic(DynamicMapping.Strict);
+                        return m;
+                    })
                     .settings(s -> s.numberOfReplicas(numberOfReplicas))
             );
             StorageLoader.getStorageLogger().debug("Index '" + indexName + "' created !");
